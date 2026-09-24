@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 讓 Mac Mini 開機後自動啟動廚餘機業務 AI。
+     把 YOUR_USER 換成 Mac 的使用者名稱，複製到 ~/Library/LaunchAgents/ 後執行：
+     launchctl load ~/Library/LaunchAgents/com.flowring.sales-ai.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.flowring.sales-ai</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USER/flowring/food-waste-sales-ai</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USER/flowring/food-waste-sales-ai/.venv/bin/uvicorn</string>
+    <string>app.main:app</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8000</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/flowring-sales-ai.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/flowring-sales-ai.log</string>
+</dict>
+</plist>
