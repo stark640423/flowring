@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>廚餘機業務 AI</title>
+<style>
+  :root {
+    --bg: #f5f7f4; --panel: #ffffff; --text: #1f2a22; --muted: #6b776e;
+    --accent: #2f7d4f; --accent-soft: #e3f1e8; --border: #dde4de; --bot: #f0f3f1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141916; --panel: #1c2320; --text: #e6ece8; --muted: #93a198;
+      --accent: #5cc184; --accent-soft: #23372b; --border: #2c3631; --bot: #242d29;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+         background: var(--bg); color: var(--text); }
+  .wrap { max-width: 760px; margin: 0 auto; height: 100dvh; display: flex; flex-direction: column; padding: 0 16px; }
+  header { padding: 16px 0 8px; }
+  h1 { font-size: 1.25rem; margin: 0 0 10px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tabs button { border: 1px solid var(--border); background: var(--panel); color: var(--text);
+                 padding: 7px 14px; border-radius: 999px; cursor: pointer; font-size: .95rem; }
+  .tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .token { margin-top: 8px; display: none; gap: 6px; align-items: center; font-size: .9rem; color: var(--muted); }
+  .token.show { display: flex; }
+  .token input { flex: 1; max-width: 220px; }
+  main { flex: 1; overflow-y: auto; padding: 8px 0; }
+  .msg { margin: 10px 0; display: flex; }
+  .msg .bubble { padding: 10px 14px; border-radius: 14px; max-width: 85%; white-space: pre-wrap; line-height: 1.6; }
+  .msg.user { justify-content: flex-end; }
+  .msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.assistant .bubble { background: var(--bot); border-bottom-left-radius: 4px; }
+  .hint { color: var(--muted); font-size: .92rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chips button { border: 1px solid var(--border); background: var(--accent-soft); color: var(--text);
+                  padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: .88rem; }
+  form { display: flex; gap: 8px; padding: 10px 0 16px; }
+  textarea, input { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+                    border-radius: 10px; padding: 10px 12px; }
+  textarea { flex: 1; resize: none; min-height: 46px; max-height: 160px; }
+  form button { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 0 18px;
+                font-size: 1rem; cursor: pointer; }
+  form button:disabled { opacity: .5; cursor: default; }
+  table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: .88rem; }
+  th { white-space: nowrap; }
+  th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>♻️ 廚餘機業務 AI</h1>
+    <div class="tabs">
+      <button data-mode="customer" class="active">客戶諮詢</button>
+      <button data-mode="sales">業務助理</button>
+      <button data-mode="leads">客戶名單</button>
+    </div>
+    <div class="token" id="tokenRow">
+      業務密碼 <input id="token" type="password" autocomplete="off">
+    </div>
+  </header>
+  <main id="log"></main>
+  <form id="form">
+    <textarea id="input" rows="1" placeholder="輸入訊息…（Enter 送出，Shift+Enter 換行）"></textarea>
+    <button id="send" type="submit">送出</button>
+  </form>
+</div>
+<script>
+const INTRO = {
+  customer: {
+    text: "您好！我是廚餘機小幫手 😊 想了解哪一款適合您家嗎？",
+    chips: ["我家 4 個人，推薦哪一台？", "會不會很吵、很臭？", "水槽下的跟桌上型差在哪？", "有什麼優惠？"],
+  },
+  sales: {
+    text: "業務助理模式：可以幫你寫文案、準備話術、處理客戶異議。",
+    chips: ["寫一則給老客戶的 LINE 推播", "客戶說「太貴了」怎麼回？", "幫我寫電話開場白", "寫 3 版 FB 貼文"],
+  },
+};
+const state = { mode: "customer", history: { customer: [], sales: [] }, busy: false, needsToken: false };
+const $ = (id) => document.getElementById(id);
+const log = $("log"), input = $("input"), sendBtn = $("send"), form = $("form");
+
+function safeGet(k) { try { return sessionStorage.getItem(k) || ""; } catch { return ""; } }
+function safeSet(k, v) { try { sessionStorage.setItem(k, v); } catch {} }
+$("token").value = safeGet("adminToken");
+$("token").addEventListener("input", (e) => safeSet("adminToken", e.target.value));
+
+fetch("/api/config").then(r => r.json()).then(c => { state.needsToken = c.sales_requires_token; render(); }).catch(() => {});
+
+function bubble(role, text) {
+  const row = document.createElement("div");
+  row.className = "msg " + role;
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = text;
+  row.appendChild(b);
+  log.appendChild(row);
+  log.scrollTop = log.scrollHeight;
+  return b;
+}
+
+function render() {
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("active", b.dataset.mode === state.mode));
+  $("tokenRow").classList.toggle("show", state.needsToken && state.mode !== "customer");
+  form.style.display = state.mode === "leads" ? "none" : "flex";
+  log.innerHTML = "";
+  if (state.mode === "leads") return renderLeads();
+  const intro = INTRO[state.mode];
+  const b = bubble("assistant", intro.text);
+  const chips = document.createElement("div");
+  chips.className = "chips";
+  intro.chips.forEach(c => {
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.textContent = c;
+    btn.onclick = () => send(c);
+    chips.appendChild(btn);
+  });
+  b.appendChild(chips);
+  state.history[state.mode].forEach(m => bubble(m.role, m.content));
+}
+
+async function renderLeads() {
+  const p = document.createElement("p");
+  p.className = "hint"; p.textContent = "載入中…";
+  log.appendChild(p);
+  try {
+    const r = await fetch("/api/leads", { headers: { "X-Admin-Token": $("token").value } });
+    if (r.status === 401) { p.textContent = "請在上方輸入業務密碼後，再點一次「客戶名單」。"; return; }
+    const rows = await r.json();
+    if (!rows.length) { p.textContent = "目前還沒有客戶留資料。"; return; }
+    p.remove();
+    const cols = { time: "時間", name: "姓名", phone: "電話", line_id: "LINE", household_size: "人數",
+                   interested_model: "有興趣機型", needs: "需求", contact_time: "方便聯絡" };
+    const wrap = document.createElement("div"); wrap.className = "table-wrap";
+    const t = document.createElement("table");
+    const head = t.insertRow();
+    Object.values(cols).forEach(c => { const th = document.createElement("th"); th.textContent = c; head.appendChild(th); });
+    rows.slice().reverse().forEach(row => {
+      const tr = t.insertRow();
+      Object.keys(cols).forEach(k => { tr.insertCell().textContent = row[k] || ""; });
+    });
+    wrap.appendChild(t); log.appendChild(wrap);
+  } catch { p.textContent = "讀取失敗，請稍後再試。"; }
+}
+
+async function send(text) {
+  text = text.trim();
+  if (!text || state.busy) return;
+  const mode = state.mode;
+  const history = state.history[mode];
+  history.push({ role: "user", content: text });
+  bubble("user", text);
+  input.value = "";
+  const out = bubble("assistant", "…");
+  state.busy = true; sendBtn.disabled = true;
+  let reply = "";
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Admin-Token": $("token").value },
+      body: JSON.stringify({ mode, messages: history.slice(-40) }),
+    });
+    if (!r.ok) {
+      reply = r.status === 401 ? "請先在上方輸入業務密碼。" : "發生錯誤（" + r.status + "），請稍後再試。";
+      history.pop();
+    } else {
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        reply += dec.decode(value, { stream: true });
+        out.textContent = reply;
+        log.scrollTop = log.scrollHeight;
+      }
+      reply = reply.trim();
+      history.push({ role: "assistant", content: reply || "（沒有回應，請再試一次）" });
+    }
+  } catch {
+    reply = "連線失敗，請稍後再試。";
+    history.pop();
+  }
+  out.textContent = reply || "（沒有回應，請再試一次）";
+  state.busy = false; sendBtn.disabled = false;
+  input.focus();
+}
+
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => { state.mode = b.dataset.mode; render(); });
+form.onsubmit = (e) => { e.preventDefault(); send(input.value); };
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); }
+});
+render();
+</script>
+</body>
+</html>
