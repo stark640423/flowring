@@ -49,6 +49,14 @@
   th { white-space: nowrap; }
   th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
   .table-wrap { overflow-x: auto; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0 10px; }
+  .bar .hint { flex: 1; min-width: 160px; margin: 0; }
+  .btn { font: inherit; font-size: .9rem; border: 1px solid var(--border); background: var(--panel); color: var(--text);
+         border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.danger { color: #c0392b; padding: 2px 8px; font-size: .8rem; }
+  textarea.kb-area { width: 100%; flex: none; min-height: 55vh; max-height: none; resize: vertical; line-height: 1.6; font-size: .92rem; }
 </style>
 </head>
 <body>
@@ -58,6 +66,7 @@
     <div class="tabs">
       <button data-mode="customer" class="active">客戶諮詢</button>
       <button data-mode="sales">業務助理</button>
+      <button data-mode="kb">產品資料</button>
       <button data-mode="leads">客戶名單</button>
     </div>
     <div class="token" id="tokenRow">
@@ -107,9 +116,10 @@ function bubble(role, text) {
 function render() {
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("active", b.dataset.mode === state.mode));
   $("tokenRow").classList.toggle("show", state.needsToken && state.mode !== "customer");
-  form.style.display = state.mode === "leads" ? "none" : "flex";
+  form.style.display = state.mode === "leads" || state.mode === "kb" ? "none" : "flex";
   log.innerHTML = "";
   if (state.mode === "leads") return renderLeads();
+  if (state.mode === "kb") return renderKb();
   const intro = INTRO[state.mode];
   const b = bubble("assistant", intro.text);
   const chips = document.createElement("div");
@@ -124,28 +134,97 @@ function render() {
   state.history[state.mode].forEach(m => bubble(m.role, m.content));
 }
 
+const authHeaders = () => ({ "X-Admin-Token": $("token").value });
+
+function el(tag, props = {}, text) {
+  const e = document.createElement(tag);
+  Object.assign(e, props);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
 async function renderLeads() {
-  const p = document.createElement("p");
-  p.className = "hint"; p.textContent = "載入中…";
+  const p = el("p", { className: "hint" }, "載入中…");
   log.appendChild(p);
   try {
-    const r = await fetch("/api/leads", { headers: { "X-Admin-Token": $("token").value } });
+    const r = await fetch("/api/leads", { headers: authHeaders() });
     if (r.status === 401) { p.textContent = "請在上方輸入業務密碼後，再點一次「客戶名單」。"; return; }
     const rows = await r.json();
-    if (!rows.length) { p.textContent = "目前還沒有客戶留資料。"; return; }
+    if (state.mode !== "leads") return;
+    if (!rows.length) { p.textContent = "目前還沒有客戶留資料。客戶在「客戶諮詢」留下姓名和電話後，會出現在這裡。"; return; }
     p.remove();
+    const bar = el("div", { className: "bar" });
+    bar.appendChild(el("p", { className: "hint" }, `共 ${rows.length} 筆，最新的在最上面。`));
+    const dl = el("button", { className: "btn", type: "button" }, "下載 Excel 檔（CSV）");
+    dl.onclick = downloadLeads;
+    bar.appendChild(dl);
+    log.appendChild(bar);
     const cols = { time: "時間", name: "姓名", phone: "電話", line_id: "LINE", household_size: "人數",
                    interested_model: "有興趣機型", needs: "需求", contact_time: "方便聯絡" };
-    const wrap = document.createElement("div"); wrap.className = "table-wrap";
-    const t = document.createElement("table");
+    const wrap = el("div", { className: "table-wrap" });
+    const t = el("table");
     const head = t.insertRow();
-    Object.values(cols).forEach(c => { const th = document.createElement("th"); th.textContent = c; head.appendChild(th); });
+    [...Object.values(cols), ""].forEach(c => head.appendChild(el("th", {}, c)));
     rows.slice().reverse().forEach(row => {
       const tr = t.insertRow();
       Object.keys(cols).forEach(k => { tr.insertCell().textContent = row[k] || ""; });
+      const cell = tr.insertCell();
+      if (!row.id) return;
+      const del = el("button", { className: "btn danger", type: "button" }, "刪除");
+      del.onclick = async () => {
+        if (del.dataset.armed !== "1") { del.dataset.armed = "1"; del.textContent = "確定刪除？"; return; }
+        del.disabled = true;
+        const res = await fetch("/api/leads/" + encodeURIComponent(row.id), { method: "DELETE", headers: authHeaders() }).catch(() => null);
+        if (res?.ok) tr.remove(); else { del.disabled = false; del.textContent = "刪除失敗，再按一次"; del.dataset.armed = "1"; }
+      };
+      cell.appendChild(del);
     });
     wrap.appendChild(t); log.appendChild(wrap);
   } catch { p.textContent = "讀取失敗，請稍後再試。"; }
+}
+
+async function downloadLeads() {
+  const r = await fetch("/api/leads.csv", { headers: authHeaders() }).catch(() => null);
+  if (!r?.ok) return;
+  const url = URL.createObjectURL(await r.blob());
+  const a = el("a", { href: url, download: "客戶名單.csv" });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function renderKb() {
+  const info = el("p", { className: "hint" }, "載入中…");
+  log.appendChild(info);
+  const r = await fetch("/api/knowledge", { headers: authHeaders() }).catch(() => null);
+  if (!r) { info.textContent = "讀取失敗，請稍後再試。"; return; }
+  if (r.status === 401) { info.textContent = "請在上方輸入業務密碼後，再點一次「產品資料」。"; return; }
+  const kb = await r.json();
+  if (state.mode !== "kb") return;
+  info.remove();
+  const bar = el("div", { className: "bar" });
+  const note = el("p", { className: "hint" },
+    "AI 只會依照這份資料回答，儲存後下一則訊息就會套用。" +
+    (kb.edited_on_web ? `（目前使用網頁上修改的版本，${kb.updated_at.replace("T", " ")} 更新）` : "（目前使用 GitHub 上的版本）"));
+  const reset = el("button", { className: "btn", type: "button", hidden: !kb.edited_on_web }, "改回 GitHub 版本");
+  const save = el("button", { className: "btn primary", type: "button", disabled: true }, "儲存");
+  bar.append(note, reset, save);
+  const area = el("textarea", { className: "kb-area", id: "kbText", value: kb.text });
+  area.oninput = () => { save.disabled = area.value === kb.text || !area.value.trim(); };
+  save.onclick = async () => {
+    save.disabled = true;
+    const res = await fetch("/api/knowledge", {
+      method: "PUT", headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text: area.value }),
+    }).catch(() => null);
+    if (res?.ok) { log.innerHTML = ""; renderKb(); }
+    else { save.disabled = false; note.textContent = "儲存失敗：請確認業務密碼正確，或內容是否超過 20 萬字。"; }
+  };
+  reset.onclick = async () => {
+    if (reset.dataset.armed !== "1") { reset.dataset.armed = "1"; reset.textContent = "確定改回？網頁上的修改會被刪除"; return; }
+    const res = await fetch("/api/knowledge", { method: "DELETE", headers: authHeaders() }).catch(() => null);
+    if (res?.ok) { log.innerHTML = ""; renderKb(); } else note.textContent = "還原失敗，請稍後再試。";
+  };
+  log.append(bar, area);
 }
 
 async function send(text) {

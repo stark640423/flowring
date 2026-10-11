@@ -8,6 +8,7 @@ import csv
 import json
 import os
 import secrets
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -25,6 +26,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 KNOWLEDGE_FILE = BASE_DIR / "knowledge" / "products.md"
+# Edits made on the web page are saved here (git-ignored) and take priority over KNOWLEDGE_FILE,
+# so `git pull` never conflicts with them.
+KNOWLEDGE_EDITED = BASE_DIR / "data" / "knowledge.md"
 LEADS_FILE = BASE_DIR / "data" / "leads.csv"
 
 # DeepSeek's API is OpenAI-compatible, so the openai package talks to it directly.
@@ -36,8 +40,9 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 MAX_MESSAGES = 40
 MAX_CHARS_PER_MESSAGE = 4000
 MAX_TOOL_ROUNDS = 5
+MAX_KNOWLEDGE_CHARS = 200_000
 
-LEAD_FIELDS = ["time", "name", "phone", "line_id", "household_size", "interested_model", "needs", "contact_time"]
+LEAD_FIELDS = ["id", "time", "name", "phone", "line_id", "household_size", "interested_model", "needs", "contact_time"]
 
 SAVE_LEAD_TOOL = {
     "type": "function",
@@ -69,8 +74,12 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 _leads_lock = asyncio.Lock()
 
 
+def knowledge_path() -> Path:
+    return KNOWLEDGE_EDITED if KNOWLEDGE_EDITED.exists() else KNOWLEDGE_FILE
+
+
 def load_knowledge() -> str:
-    return KNOWLEDGE_FILE.read_text(encoding="utf-8")
+    return knowledge_path().read_text(encoding="utf-8")
 
 
 def check_admin(token: str | None) -> None:
@@ -86,7 +95,7 @@ def validate_lead(arguments: str) -> dict[str, str] | None:
         return None
     if not isinstance(data, dict):
         return None
-    lead = {k: str(data.get(k, "") or "").strip()[:500] for k in LEAD_FIELDS if k != "time"}
+    lead = {k: str(data.get(k, "") or "").strip()[:500] for k in LEAD_FIELDS if k not in ("id", "time")}
     if not lead["name"] or not (lead["phone"] or lead["line_id"]):
         return None
     return lead
@@ -101,12 +110,23 @@ async def save_lead(lead: dict[str, str]) -> None:
             writer = csv.DictWriter(f, fieldnames=LEAD_FIELDS)
             if is_new:
                 writer.writeheader()
-            writer.writerow({"time": datetime.now().isoformat(timespec="seconds"), **lead})
+            writer.writerow({"id": uuid.uuid4().hex[:12], "time": datetime.now().isoformat(timespec="seconds"), **lead})
+
+
+def read_leads() -> list[dict[str, str]]:
+    if not LEADS_FILE.exists():
+        return []
+    with LEADS_FILE.open(encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
 
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(max_length=MAX_CHARS_PER_MESSAGE)
+
+
+class KnowledgeUpdate(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_KNOWLEDGE_CHARS)
 
 
 class ChatRequest(BaseModel):
@@ -198,12 +218,63 @@ async def chat(req: ChatRequest, x_admin_token: str | None = Header(default=None
 @app.get("/api/leads")
 async def leads(x_admin_token: str | None = Header(default=None)):
     check_admin(x_admin_token)
+    return read_leads()
+
+
+@app.delete("/api/leads/{lead_id}")
+async def delete_lead(lead_id: str, x_admin_token: str | None = Header(default=None)):
+    check_admin(x_admin_token)
+    async with _leads_lock:
+        rows = read_leads()
+        kept = [r for r in rows if r.get("id") != lead_id]
+        if len(kept) == len(rows):
+            raise HTTPException(status_code=404, detail="找不到這筆客戶資料")
+        tmp = LEADS_FILE.with_suffix(".tmp")
+        with tmp.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=LEAD_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(kept)
+        tmp.replace(LEADS_FILE)
+    return {"ok": True}
+
+
+@app.get("/api/leads.csv")
+async def leads_csv(x_admin_token: str | None = Header(default=None)):
+    check_admin(x_admin_token)
     if not LEADS_FILE.exists():
-        return []
-    with LEADS_FILE.open(encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+        raise HTTPException(status_code=404, detail="還沒有客戶資料")
+    return FileResponse(LEADS_FILE, media_type="text/csv", filename="leads.csv")
+
+
+@app.get("/api/knowledge")
+async def get_knowledge(x_admin_token: str | None = Header(default=None)):
+    check_admin(x_admin_token)
+    path = knowledge_path()
+    return {
+        "text": path.read_text(encoding="utf-8"),
+        "edited_on_web": path == KNOWLEDGE_EDITED,
+        "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="minutes"),
+    }
+
+
+@app.put("/api/knowledge")
+async def put_knowledge(body: KnowledgeUpdate, x_admin_token: str | None = Header(default=None)):
+    check_admin(x_admin_token)
+    KNOWLEDGE_EDITED.parent.mkdir(parents=True, exist_ok=True)
+    tmp = KNOWLEDGE_EDITED.with_suffix(".tmp")
+    tmp.write_text(body.text, encoding="utf-8")
+    tmp.replace(KNOWLEDGE_EDITED)
+    return {"ok": True}
 
 
 @app.get("/api/config")
 async def config():
     return {"sales_requires_token": bool(ADMIN_TOKEN)}
+
+
+@app.delete("/api/knowledge")
+async def reset_knowledge(x_admin_token: str | None = Header(default=None)):
+    """Drop the web edits and go back to knowledge/products.md from GitHub."""
+    check_admin(x_admin_token)
+    KNOWLEDGE_EDITED.unlink(missing_ok=True)
+    return {"ok": True}

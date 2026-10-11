@@ -83,13 +83,15 @@ https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 
 ## 7. 更新知識庫
 
-知識庫是 `knowledge/products.md`。在 GitHub 上修改後，在 Mac Mini 執行：
+最簡單的方式是在網頁的「產品資料」分頁直接修改並儲存。
+
+如果要改 GitHub 上的 `knowledge/products.md`，修改後在 Mac Mini 執行：
 
 ```bash
 cd ~/flowring && git pull
 ```
 
-就會生效，不用重開 App（每次對話都會重新讀取知識庫）。
+就會生效，不用重開 App（每次對話都會重新讀取知識庫）。注意：如果曾經在網頁上儲存過，系統會優先使用網頁版本，要先在「產品資料」分頁按「改回 GitHub 版本」。
 
 也可以讓 OpenClaw 定時執行 `git pull`，這樣只要在 GitHub 改檔案就會自動更新。
 
